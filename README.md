@@ -1,203 +1,215 @@
-# ESP32 + HM-10 Remote PTT + Callgever (CW-ID)
+# ESP32 CW-ID Generator + Bluetooth Remote PTT
 
-Firmware voor een klassieke ESP32 (WROOM/WROVER) die twee dingen combineert:
-een **remote PTT-schakelaar** (bediend via een HM-10 BLE-module, bv. een
-knopje op afstand) en een **callgever**: een CW-ID-beacon die automatisch je
-roepnaam in morse uitzendt via de ingebouwde DAC zodra je zendt. Bediening en
-instellingen (callsign, volume, snelheid, toonfrequentie, timing) lopen via
-een ingebouwde webpagina - geen app of externe libraries nodig.
+Firmware for a classic ESP32 that does two things:
 
-Eén gecombineerde sketch: de bestaande "remote PTT via HM-10" functionaliteit
-plus de callgever (morse-ID beacon), die nu getriggerd wordt door diezelfde
-PTT-status in plaats van een losse fysieke ingang.
+1. **Remote PTT** – a wireless push-to-talk button, built from a pair of
+   HM-10 Bluetooth LE modules, keys your transmitter through a relay.
+2. **CW-ID** – every time you key up, the ESP32 sends your callsign in Morse
+   code as an audio tone (from the built-in DAC) and holds PTT until the ID is
+   finished.
 
-## Bugfix: crash direct na het starten van de toon-interrupt opgelost
+Everything is configured from a built-in web page: no app, no extra
+libraries.
 
-De echte oorzaak (bevestigd door de ESP32-DAC-broncode erop na te slaan):
-`dacWrite()` initialiseert de DAC-peripheral **lui** - pas bij de allereerste
-aanroep voor een pin wordt er intern een "oneshot channel" aangemaakt
-(`dac_oneshot_new_channel`), en dat doet een heap-allocatie en pakt interne
-locks. Dat is prima in gewone code, maar **niet veilig binnen een
-interrupt**. `audioInit()` startte de 40kHz-timer/interrupt echter vóórdat er
-ooit ergens anders al een `dacWrite()`-aanroep had plaatsgevonden, waardoor
-die allereerste, onveilige initialisatie binnen de interrupt zelf gebeurde -
-en dat gaf exact de gerapporteerde "Guru Meditation Error (LoadProhibited)",
-vrijwel meteen nadat de timer voor het eerst afging (in jouw log precies na
-"Ook bereikbaar via http://esp32-ptt.local/", want dat is waar `audioInit()`
-in de opstartvolgorde wordt aangeroepen). Fix: `audioInit()` roept
-`dacWrite()` nu eerst één keer aan in gewone code, vóórdat de timer/interrupt
-wordt gestart, zodat de DAC-peripheral al klaar staat tegen de tijd dat de
-interrupt voor het eerst draait (elke latere `dacWrite()`-aanroep vanuit de
-interrupt is daarna alleen nog een lichte, veilige registerschrijf-actie).
+## Features
 
-(Een eerdere aanpassing verplaatste `audioInit()`/`morse.begin()` ook al naar
-ná het WiFi-verbindingsproces en `mDNS.begin()` - dat blijft een verstandige
-extra voorzorg tegen een ander, zeldzamer risico [een flash-schrijfactie
-tijdens WiFi's eerste verbinding], maar bleek niet de daadwerkelijke oorzaak
-van deze crash te zijn: de crash trad nog steeds op, meteen na het starten
-van de interrupt, ongeacht wanneer dat in de opstartvolgorde gebeurde - zoals
-ook in het nieuwe crashlog te zien was.)
+- Wireless PTT via two HM-10 BLE modules, plus a PTT button on the web page.
+- Automatic CW-ID on key-up, after a configurable delay (0–25 s).
+- If PTT is held continuously, the ID is repeated automatically every 5 minutes.
+- Adjustable callsign, speed (5–30 WPM), tone (400–1500 Hz), volume and
+  attack/release envelope (no key clicks).
+- Test buttons for the full ID and for a plain tone.
+- Settings are stored in flash and survive a reboot.
+- Status LEDs for PTT and for the Bluetooth link.
 
-**Tweede, aparte crash - opgelost:** na deze fix startte de ESP32 wél goed op
-(zelfs tot en met "PTT-uitgang AAN" in de log), maar crashte alsnog op het
-moment dat de allereerste toon echt begon te spelen, weer met dezelfde "Guru
-Meditation Error (LoadProhibited)". Oorzaak: de interrupt rekende met
-`float`-getallen (het envelop-niveau en de op-/afloop-stappen).
-Floating-point-rekenwerk *binnen een interrupt* is op de ESP32 (Xtensa) niet
-veilig - de FPU-registers worden alleen lui bewaard/hersteld voor gewone
-taken, niet voor interrupt-handlers, dus zodra de interrupt voor het eerst
-een `float`-berekening deed (namelijk zodra de envelop voor het eerst van
-"stil" af ging, dus bij de eerste PTT/trigger-actie), crashte dat. Zolang er
-niets werd uitgezonden, bleef de ISR in een puur integer-pad hangen (vandaar
-dat opstarten zelf niet meer crashte, maar de eerste échte toon nog wel).
-Fix: alle rekenwerk in de interrupt zelf is omgezet naar gehele getallen
-(vast-kommaformaat, schaal 2^15) - alleen de code die de op-/afloop-snelheid
-*berekent* (buiten de interrupt, als je de instellingen opslaat) gebruikt nog
-`float`, wat prima is zolang het maar niet in de interrupt zelf gebeurt.
+## Hardware
 
-## Wat is er veranderd t.o.v. de twee losse projecten
-
-- De callgever heeft **geen eigen DI-pin (GPIO27) meer**. Zijn trigger is nu
-  de gecombineerde PTT-status `remotePtt || webPtt` (dus de HM-10-remote-knop
-  ÓF de PTT-knop op de webpagina).
-- Zodra die PTT-status van laag naar hoog gaat en de callgever aan staat,
-  wordt na de ingestelde vertraging (0-25000 ms) de call in morse uitgezonden
-  op de DAC (GPIO25), **terwijl de PTT-uitgang (D21) actief blijft** zolang de
-  ID speelt - ook als de operator/remote intussen al losgelaten heeft. Zo
-  blijft de zender aan tot de ID écht klaar is.
-- Laat je de PTT los vóórdat de vertraging voorbij is: de ID wordt
-  geannuleerd (net als voorheen).
-- Zet je de callgever tussentijds uit via de webpagina terwijl hij aan het
-  zenden is: hij stopt direct.
-- Blijft de PTT na afloop van de ID nog ingedrukt: er wordt pas een nieuwe ID
-  geaccepteerd nadat de PTT ook echt losgelaten is.
-- Nieuwe pagina **`/callgever`** (link vanaf de hoofdpagina) voor callsign,
-  aan/uit, volume, WPM en toonfrequentie - inclusief een testknop. Instellingen
-  worden net als WiFi/MQTT bewaard in NVS-flash (zelfde "cfg"-namespace,
-  nieuwe "cg_*"-keys).
-- De hoofdpagina toont nu een tweede statusregel ("CW-ID stand-by" /
-  "CW-ID wordt uitgezonden...").
-- Alle instellingen die tijdens het draaien naar flash geschreven worden
-  (WiFi-opslaan, MQTT-opslaan, WiFi-reset, callgever-opslaan) pauzeren nu
-  eerst de DAC-sample-interrupt (`audioPause()`/`audioResume()`) - dat
-  voorkomt een zeldzame crash doordat de audio-ISR tijdens een
-  flash-schrijfactie de instructiecache nodig heeft.
-- De morse-toon wordt niet meer abrupt aan/uit geschakeld: elke dot/dash
-  heeft nu een **instelbare** attack/release-envelop, zodat er geen hoorbare
-  "klik" (en bijbehorende bandbreedte-spatten) bij het aan/uit schakelen
-  ontstaat. **Attack** (oprijtijd, 1-20 ms) en **release** (uitrijtijd,
-  10-100 ms) staan als sliders op `/callgever`, met 1ms resp. 10ms als
-  standaardwaarde. Let op: bij hogere WPM wordt een dot korter dan de
-  release-tijd kan zijn (bv. bij 20 wpm is 1 dit maar 60ms) - de toon sterft
-  dan niet meer helemaal weg tussen twee elementen; kies release en
-  snelheid dus in combinatie.
-- Op `/callgever` staat nu ook een "Toon (ingedrukt houden)"-knop om de kale
-  toon te testen zonder de hele call af te wachten.
-- Nieuwe uitgang **GPIO4 (`ID_ACTIVE_PIN`)**: tekent de morse-code van de ID
-  daadwerkelijk uit - hoog tijdens elke dot/dash, laag in de pauzes ertussen
-  (dus geen constante hoog-periode voor de hele ID, maar een echt
-  knipperend morse-signaal, alsof je met een sleutel meetikt). Niet actief
-  zolang de PTT-uitgang om een andere reden actief is, en ook niet tijdens
-  de handmatige testtoon - in tegenstelling tot GPIO2, dat de bredere
-  PTT-uitgangsstatus toont.
-- Morse-snelheid blijft **5-30 WPM**.
-
-## Latere aanpassingen
-
-- **PTT-detectie versneld:** de pollingcyclus naar de HM-10 (`AT+PIO3?`) is
-  verkrapt (pollgap 20 -> 5 ms, response-timeout 150 -> 50 ms), en de
-  HM-10-afhandeling in `loop()` krijgt nu altijd voorrang op
-  `server.handleClient()` (een trage webclient kan de PTT-detectie dus niet
-  meer vertragen). Blijft inherent een pollingsysteem: een druk die korter
-  duurt dan de effectieve pollcyclus (nu enkele ms) kan in theorie nog steeds
-  tussen twee metingen door vallen.
-- **Nieuwe optie "PTT loslaten breekt ID direct af"** op `/callgever` (uit,
-  standaard). Staat hij aan, dan stopt een lopende ID-uitzending meteen zodra
-  je de PTT loslaat, i.p.v. hem altijd af te maken.
-- **Nazendstilte:** wordt een ID gewoon afgemaakt (niet afgebroken via
-  bovenstaande optie), dan blijft de PTT-uitgang daarna nog 500 ms actief
-  zonder toon (stilte) voordat hij loslaat - vaste waarde (`CG_TAIL_SILENCE_MS`
-  in de code), niet instelbaar via de webpagina.
-
-## Pinnen (ongewijzigd + toegevoegd)
-
-| Pin | Functie |
+| Part | Notes |
 |---|---|
-| GPIO16 / GPIO17 | HM-10 UART2 (RX/TX) |
-| GPIO21 | PTT-uitgang -> transistor -> relais -> PTT-lijn zender |
-| GPIO18 / GPIO19 | BLE-linkstatus LED's (verbonden / link weg, knipperend) |
-| GPIO2 | status-LED, aan zolang de PTT-uitgang actief is (dus ook tijdens het uitzenden van de ID) |
-| **GPIO25** | analoge morse-toon (ingebouwde DAC1) |
-| **GPIO4** | **nieuw:** tekent de morse-code van de ID uit (hoog per dot/dash, niet de bredere PTT-status) |
-| ~~GPIO27~~ | vervallen (was de oude DI-pin van de losse callgever, wordt nu niet meer gebruikt) |
+| Classic ESP32 dev board (WROOM/WROVER) | **Must be a classic ESP32**: the S2, S3, C3 and C6 have no DAC. |
+| 2× HM-10 BLE module | Must be **genuine HM-10 (HMSoft firmware)**, see [HM-10 configuration](#hm-10-configuration). |
+| Push button + 10 kΩ resistor | For the remote. |
+| NPN transistor + relay (or optocoupler) | Switches the transmitter's PTT line. |
+| 1–10 µF capacitor + resistor divider (e.g. 10 kΩ / 1 kΩ) | Brings the DAC audio down to microphone level. |
 
-**Let op:** de ingebouwde DAC bestaat alleen op de klassieke ESP32
-(WROOM/WROVER) - niet op ESP32-S2/S3/C3/C6.
+### Wiring
 
-### Audio-uitgang naar de zender
+| ESP32 pin | Connect to |
+|---|---|
+| GPIO16 (RX2) | HM-10 **TX** (base station module) |
+| GPIO17 (TX2) | HM-10 **RX** (base station module) |
+| GPIO21 | PTT output → transistor → relay → transmitter PTT |
+| GPIO25 | CW audio (DAC) → capacitor → divider → transmitter mic input |
+| GPIO2 | Status LED: on while PTT is active (most boards have this LED on board) |
+| GPIO18 | LED: on while the remote is connected |
+| GPIO19 | LED: blinks while the remote is disconnected |
+| GPIO4 | Optional: goes high during each Morse dot/dash of the ID (keying output) |
 
-GPIO25 staat in rust op ongeveer **1.65V** (midden van de DAC-range), niet op
-0V. Zet er een **serie-condensator** (DC-blokkering, bv. 1-10 µF) en
-eventueel een **spanningsdeler** (bv. 10 kΩ/1 kΩ) achter om het signaal
-(tot 3.3Vpp) naar mic-niveau te brengen. Omdat de PTT-uitgang tijdens het
-zenden van de ID toch al actief is, kun je dit DAC-signaal met een simpele
-weerstand bijmengen op dezelfde mic-lijn als je normale audio, of - netter -
-met een klein relais/analoge schakelaar de mic-ingang tijdens het zenden van
-de ID omschakelen naar de DAC, zodat je stem en de morse-toon elkaar niet
-overlappen.
+Power the HM-10 modules from 3.3 V. Their logic is 3.3 V, so they connect
+directly to the ESP32.
 
-## Installatie (Arduino IDE)
+**Audio:** GPIO25 idles at about 1.65 V and swings up to 3.3 Vpp. Always
+use a series capacitor to block the DC, and a voltage divider to reduce the
+level to what your mic input expects. To keep your voice and the CW-ID from
+mixing, you can switch the mic input over to the DAC during the ID with a
+small relay or analogue switch.
 
-1. Kopieer de map `esp32_callgever_ptt` (met alle bestanden) naar je
-   Arduino-sketchmap zodat het pad `Arduino/esp32_callgever_ptt/esp32_callgever_ptt.ino`
-   wordt (mapnaam = bestandsnaam, verplicht voor de Arduino IDE).
-2. Board: "ESP32 Dev Module" (of je specifieke klassieke ESP32-bord) via het
-   esp32-bordpakket van Espressif.
-3. Geen externe libraries nodig - alleen de standaard ESP32-Arduino-core
-   (WiFi, WebServer, Preferences, ESPmDNS, HardwareSerial) plus de
-   meegeleverde `morse.h/.cpp` en `audio_dac.h/.cpp`.
-4. Upload, open de Seriële Monitor (115200 baud).
-5. Er zijn nog geen WiFi-gegevens opgeslagen -> de ESP32 start het access
-   point **"ESP32-PTT-Setup"**. Verbind daarmee, ga naar `http://192.168.4.1/`
-   en vul je eigen netwerk in. De ESP32 herstart en verbindt.
-6. Daarna bereikbaar via `http://esp32-ptt.local/` (mDNS) of het IP-adres uit
-   de Seriële Monitor. Hoofdpagina = PTT-knop, met links naar
-   **Callgever (CW-ID) instellingen** en **MQTT instellingen**.
+**PTT polarity:** the PTT output is active-high by default. For an
+active-low output, set `PTT_ACTIVE_HIGH` to `false` in the sketch.
 
-## Gedrag samengevat
+## HM-10 configuration
 
-- **Callgever ingeschakeld** staat aan/uit op `/callgever`. Staat hij uit, dan
-  doet PTT niets met de callgever (normale PTT-werking blijft gewoon actief).
-- De trigger is **flank-gebaseerd** (laag->hoog): een PTT-signaal dat al bij
-  het opstarten "aan" staat, triggert dus niet vanzelf.
-- De testknop op `/callgever` zet ook echt de PTT-uitgang aan zolang de test-ID
-  speelt - dus als de zender is aangesloten, gaat hij daadwerkelijk zenden.
-- **Verplichte herhaling bij lang ononderbroken PTT:** blijft de PTT
-  onafgebroken ingedrukt (dus zonder ooit los te laten) langer dan **4
-  minuten 59 seconden** vanaf het moment dat hij voor het eerst inging, dan
-  zendt de callgever automatisch opnieuw de call uit - ook zonder nieuwe
-  flank. Daarna herhaalt dit zich elke **5 minuten**, zolang de PTT
-  ononderbroken ingedrukt blijft. Laat je de PTT een keer los, dan stopt deze
-  cyclus direct en telt hij bij een volgende druk weer vanaf nul. Is een
-  herhaal-ID nog bezig op het moment dat de PTT loslaat, dan wordt die ID -
-  net als de eerste - altijd afgemaakt.
+The system uses two HM-10 modules:
 
-## Nog niet gedaan / mogelijke vervolgstappen
+- **Remote module**: battery powered, with the PTT button on its **PIO3** pin.
+- **Base module**: wired to the ESP32.
 
-- De MQTT-instellingen (`/setup`) worden al opgeslagen, maar er wordt nog
-  geen daadwerkelijke MQTT-verbinding opgezet - dat was in het aangeleverde
-  bestand al aangegeven als "volgende stap" en is in deze samenvoeging niet
-  aangepakt.
-- Geen authenticatie op de webpagina's; ga ervan uit dat iedereen die met het
-  netwerk (of de AP) verbonden is, instellingen kan wijzigen en de zender kan
-  aansturen.
-- Zorgvuldig nagelezen en met een onafhankelijke code-review gecontroleerd
-  (o.a. een ontbrekende HTML-escape en een randgeval waarbij de testknop en
-  een PTT-trigger elkaar konden overlappen zijn hierbij gevonden en
-  gefixt), maar **niet fysiek getest op echte hardware** (geen
-  ESP32/HM-10-toolchain beschikbaar in de omgeving waarin dit gemaakt is).
-  Meld het gerust terug als je bij het compileren of testen iets tegenkomt.
+The base module connects to the remote module automatically. The ESP32 then
+keeps asking for the state of the button with `AT+PIO3?`, and the remote
+module answers `OK+PIO3:0` (released) or `OK+PIO3:1` (pressed).
 
-## Licentie
+### What you need
 
-Zie [LICENSE](LICENSE) (MIT) - vrij te gebruiken, aan te passen en te delen.
+- A 3.3 V USB-to-serial adapter (FTDI, CP2102, CH340…).
+- A serial terminal at **9600 baud**. The Arduino IDE Serial Monitor works;
+  set the line ending to **"No line ending"**. Genuine HM-10 modules expect
+  commands without CR/LF.
+
+Connect adapter TX → HM-10 RX, adapter RX → HM-10 TX, GND → GND, and
+3.3 V → VCC. Configure one module at a time. The module must **not** be
+connected to another Bluetooth device while you configure it.
+
+### 1. Check that the module is a genuine HM-10
+
+```
+AT          → OK
+AT+VERR?    → HMSoft V7xx (or similar)
+```
+
+If the version does not start with `HMSoft`, or `AT` gets no answer without a
+line ending, the module is probably a clone (CC41-A, MLT-BT05, JDY-08…).
+Clones usually do not support the remote pin mode used here, so replace them
+with genuine modules. Flashing HMSoft firmware onto a CC2541 clone is
+possible, but outside the scope of this guide.
+
+### 2. Configure the remote module (the one with the button)
+
+```
+AT+RENEW      → factory defaults (optional, but a good starting point)
+AT+ROLE0      → peripheral (slave)
+AT+MODE1      → lets the connected device read its PIO pins
+AT+ADDR?      → write down the 12-character address, e.g. OK+ADDR:20C38FF61234
+AT+RESET
+```
+
+Wire the button between **PIO3** and **3.3 V**, and add a **10 kΩ pull-down**
+from PIO3 to GND. The ESP32 treats `1` (high) as "PTT pressed", so the pin
+must read low when the button is released.
+
+### 3. Configure the base module (the one wired to the ESP32)
+
+```
+AT+RENEW                 → factory defaults (optional)
+AT+ROLE1                 → central (master)
+AT+NOTI1                 → report OK+CONN / OK+LOST (the ESP32 also sends this at boot)
+AT+IMME1                 → wait for commands at power-up (needed to pair manually)
+AT+CON20C38FF61234       → connect to the remote's address from step 2
+```
+
+When you see `OK+CONN`, the link works. Now make the connection automatic:
+
+```
+AT+IMME0                 → at power-up, reconnect automatically to the last device
+AT+RESET
+```
+
+From now on the base module reconnects to the remote every time it powers
+up. While connected, you can test the button from the terminal: `AT+PIO3?`
+should answer `OK+PIO3:0` and `OK+PIO3:1` as you release and press it.
+
+Both modules must stay at the default **9600 baud** (`AT+BAUD0`).
+
+> Notes:
+> - Command details differ slightly between HMSoft firmware versions. If a
+>   command is rejected, check the datasheet for your firmware version.
+> - This guide was written from the firmware's behaviour and the HM-10
+>   datasheet. The full setup has not yet been confirmed on real hardware.
+
+## Installing the firmware
+
+1. Install the Arduino IDE and the **esp32** board package by Espressif
+   (Boards Manager).
+2. The Arduino IDE requires the folder name to match the sketch name. Put all
+   `.ino`, `.cpp` and `.h` files from this repository in a folder named
+   **`esp32_callgever_ptt`**.
+3. Open `esp32_callgever_ptt.ino`, select **ESP32 Dev Module** (or your
+   board) and upload. No extra libraries are needed.
+4. Open the Serial Monitor at 115200 baud to watch the log.
+
+## First start
+
+1. With no Wi-Fi saved, the ESP32 starts its own access point,
+   **`ESP32-PTT-Setup`**. Connect to it and open `http://192.168.4.1/`.
+2. Enter your Wi-Fi network name and password. The ESP32 restarts and joins
+   your network. If it cannot connect within 15 seconds, it goes back to the
+   setup access point.
+3. Open **`http://esp32-ptt.local/`**, or the IP address shown in the Serial
+   Monitor.
+4. Go to **CW-ID settings** and **set your own callsign** (the default is
+   `PD0TEST`).
+
+## Web interface
+
+| Page | Purpose |
+|---|---|
+| `/` | Status of PTT, the Bluetooth link and the CW-ID, plus a hold-to-talk PTT button |
+| `/callgever` | CW-ID settings, test ID and test tone |
+| `/setup` | MQTT settings (stored but not used yet, see limitations) |
+
+### CW-ID settings
+
+| Setting | Range | Default |
+|---|---|---|
+| Callsign | up to 15 characters | `PD0TEST` |
+| Enabled | on / off | on |
+| Volume | 0–100 % | 70 % |
+| Speed | 5–30 WPM | 15 WPM |
+| Tone | 400–1500 Hz | 800 Hz |
+| Delay after key-up | 0–25000 ms | 25000 ms |
+| Attack | 1–20 ms | 1 ms |
+| Release | 10–100 ms | 10 ms |
+| Releasing PTT aborts the ID | on / off | off |
+
+At higher speeds a dot can be shorter than the release time (at 20 WPM a dot
+is 60 ms). The tone then never fully fades between elements, so choose
+release time and speed together.
+
+## How the CW-ID behaves
+
+- The ID starts when PTT goes from **off to on**, from the remote or the web
+  button, and the configured delay has passed. If PTT is already on at boot,
+  no ID is triggered.
+- If you release PTT before the delay has passed, the ID is cancelled.
+- Once the ID has started, it is always completed: PTT stays keyed until the
+  ID ends, followed by 500 ms of silence. The exception is when **"Releasing
+  PTT aborts the ID"** is on; then releasing PTT stops the ID immediately.
+- Turning the CW-ID off on the web page stops a running ID immediately.
+- If PTT stays held after the ID, a new ID needs a new key-up. The exception
+  is a continuous transmission: if PTT is held without release, the ID is
+  repeated at 4:59 and then every 5 minutes.
+- **"Test ID"** really keys the transmitter. Make sure that is what you want
+  when a radio is connected.
+
+## Limitations
+
+- **No authentication**: anyone on your network (or on the setup access
+  point) can change settings and key the transmitter.
+- **MQTT** settings can be saved, but no MQTT connection is made yet.
+- The remote button is polled, so a press much shorter than a few
+  milliseconds could be missed.
+- **Not yet tested on real hardware.** Please open an issue if you run into
+  problems when compiling or using it.
+
+## License
+
+[MIT](LICENSE): free to use, modify and share.
