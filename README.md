@@ -205,8 +205,9 @@ release time and speed together.
 - **No authentication**: anyone on your network (or on the setup access
   point) can change settings and key the transmitter.
 - **MQTT** settings can be saved, but no MQTT connection is made yet.
-- The remote button is polled, so a press much shorter than a few
-  milliseconds could be missed.
+- The remote button is polled over the Bluetooth link, so a very short press
+  (shorter than one poll round trip, typically a few tens of milliseconds)
+  could be missed.
 - **Not yet tested on real hardware.** Please open an issue if you run into
   problems when compiling or using it.
 

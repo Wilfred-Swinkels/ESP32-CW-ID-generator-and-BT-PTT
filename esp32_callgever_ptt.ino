@@ -93,8 +93,11 @@
 #define LINK_LOST_PIN        19     // D19 - knippert (1s aan/uit) zolang de link weg is
 #define LINK_LOST_BLINK_MS   1000
 
-// AT+PIO3? is een lokale vraag aan het HM-10 (geen BLE round-trip), dus het
-// antwoord komt bij een normale module vrijwel meteen terug. MIN_POLL_GAP_MS
+// AT+PIO3? wordt alleen verstuurd zolang de BLE-link staat: de HM-10 aan de
+// ESP32 stuurt het dan transparant door naar de remote-HM10 (AT+MODE1), die
+// de stand van zijn eigen PIO3 (de PTT-knop) terugmeldt als OK+PIO3:0/1. Elk
+// antwoord is dus een BLE round-trip en duurt minstens ongeveer één
+// BLE-verbindingsinterval (typisch enkele tientallen ms). MIN_POLL_GAP_MS
 // en RESPONSE_TIMEOUT_MS bepalen samen hoe snel een PTT-druk op de remote
 // hoogstens gezien kan worden (elke druk die korter duurt dan de effectieve
 // pollcyclus valt tussen twee metingen door en wordt onvermijdelijk gemist -
