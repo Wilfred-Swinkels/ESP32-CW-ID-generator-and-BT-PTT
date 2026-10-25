@@ -1,6 +1,7 @@
 /*
   ================================================================
   ESP32 + HM-10 (BLE)  ->  Remote PTT switch + Callgever (CW-ID)
+                              de ON4NDO
   ================================================================
   This is the original "ESP32 + HM-10 Remote PTT" sketch, extended with
   the callgever (morse-ID beacon). The callgever no longer has its own
@@ -116,7 +117,7 @@
 #define DEBOUNCE_COUNT       1      // 1 = react immediately; higher (2-3) for noise/glitches
 
 // ================= Settings: WiFi / web =================
-#define AP_SSID              "ESP32-PTT-Setup"   // our own access point during setup
+#define AP_SSID              "ESP32-BT-PTT-Setup" // our own access point during setup
 #define WIFI_CONNECT_TIMEOUT_MS  15000            // how long to try connecting before falling back to AP
 // Was 1500ms; with a flaky WiFi connection (weak signal, roaming between
 // APs) several keepalive pings in a row (every 250ms, see MAIN_PAGE) can
@@ -126,6 +127,27 @@
 // still being fast enough for a genuinely closed browser/connection.
 #define WEB_PTT_TIMEOUT_MS   3000                 // fail-safe: no keepalive -> web-PTT off
 #define MDNS_HOSTNAME         "esp32-BT-PTT"       // reachable via http://esp32-BT-PTT.local/
+
+// Our UniFi network broadcasts the same SSID from several APs (Shack,
+// Tuinhuis, Huiskamer, Boven, Kelder). Left to its own devices, the ESP32
+// will associate with whichever one it happens to see first during its
+// connect attempt, which is not necessarily the nearby/strong one - that's
+// what was causing repeated 15s connect timeouts and falling back to
+// AP-setup mode.
+//
+// First attempt at fixing this was to hardcode the Shack AP's BSSID (found
+// via the UniFi controller's AirView RF scan) and connect straight to it.
+// That made things WORSE (connect failed outright every time) - most
+// likely because that radio broadcasts several SSIDs at once ("WiFi-naam:
+// Meerdere" in the UniFi UI), each under its own virtual BSSID, and the
+// single BSSID AirView's summary panel showed was for a different SSID on
+// that radio, not for "Swinkels". So: instead of hardcoding a BSSID that
+// can't actually be verified to be correct for this network, we scan for
+// real at every boot and connect to whichever AP is actually broadcasting
+// our SSID with the strongest signal - that's self-correcting (works
+// regardless of which AP is nearest/strongest at any given moment, survives
+// APs being added/moved/replaced) instead of relying on a guess.
+#define WIFI_SCAN_FIRST       1          // 1 = scan and pick strongest AP for our SSID, 0 = plain WiFi.begin()
 
 // ================= Settings: Callgever (CW-ID) =================
 // NO separate DI pin anymore - the trigger is the combined PTT status
@@ -185,7 +207,7 @@ struct CgConfig {
   uint8_t volume;    // 0-100 %
   uint8_t wpm;       // 5-30
   uint16_t freqHz;   // 400-1500
-  uint16_t delayMs;  // 0-50000
+  uint16_t delayMs;  // 0-50000 ms (the web slider shows this in seconds, 0-50 s)
   uint8_t attackMs;  // 1-20, ramp-up time of the tone envelope
   uint8_t releaseMs; // 1-50, ramp-down time of the tone envelope
   bool abortOnRelease; // true = releasing PTT aborts a running ID immediately
@@ -281,8 +303,10 @@ h1{font-size:1.3rem;font-weight:600;margin:0 0 1.4rem}
 .ptt-btn:active{transform:scale(.96)}
 a.setup-link{color:#7aa2ff;text-decoration:none;margin-top:1.4rem;font-size:.9rem;display:block}
 .uptime{color:#444;font-size:.7rem;margin-top:1.2rem}
+.vanity{color:#6b7280;font-size:.75rem;letter-spacing:.06em;margin:-.9rem 0 1.4rem}
 </style></head><body>
 <h1>Remote PTT</h1>
+<div class="vanity">de ON4NDO</div>
 <div class="status-row"><span class="lamp" id="lamp"></span><span id="linkText">remote connected</span></div>
 <div class="status-row last"><span class="lamp" id="cglamp"></span><span id="cgText">CW-ID standby</span></div>
 <button class="ptt-btn" id="pttBtn" aria-label="PTT">
@@ -371,6 +395,64 @@ window.addEventListener('pagehide', pttOff);
 )rawliteral";
 
 // ================================================================
+//           WiFi: scan first, connect to the strongest AP
+// ================================================================
+// Scans for the given SSID across all APs currently broadcasting it, logs
+// every match found (BSSID/channel/RSSI) over Serial for diagnostics, and
+// starts connecting to whichever one has the strongest signal right now -
+// pinning WiFi.begin() to that AP's exact BSSID+channel so it can't
+// silently end up associating with a different, weaker one mid-attempt.
+// Returns true if a matching network was found and a connect was started
+// (NOT whether the connect itself then succeeded - that's still checked
+// afterwards with the normal WiFi.status()/timeout loop in setup()).
+// If no AP broadcasting this SSID is found at all, falls back to a plain
+// WiFi.begin() (unpinned) as a last resort, in case the scan simply missed
+// it (scans aren't 100% reliable either) - better to still try than to
+// give up immediately.
+static bool connectToStrongestAp(const String &ssid, const String &pass) {
+  Serial.println(F("Scanning for WiFi networks..."));
+  int n = WiFi.scanNetworks(false, false); // synchronous, don't show hidden SSIDs
+  if (n <= 0) {
+    Serial.println(F("  scan found no networks at all - trying unpinned connect anyway"));
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    return false;
+  }
+
+  int bestIdx = -1;
+  int32_t bestRssi = -1000;
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) != ssid) continue;
+    Serial.print(F("  found AP for this SSID: BSSID "));
+    Serial.print(WiFi.BSSIDstr(i));
+    Serial.print(F(", channel "));
+    Serial.print(WiFi.channel(i));
+    Serial.print(F(", RSSI "));
+    Serial.print(WiFi.RSSI(i));
+    Serial.println(F(" dBm"));
+    if (WiFi.RSSI(i) > bestRssi) {
+      bestRssi = WiFi.RSSI(i);
+      bestIdx = i;
+    }
+  }
+
+  bool found = (bestIdx >= 0);
+  if (found) {
+    Serial.print(F("  -> connecting to strongest match: "));
+    Serial.print(WiFi.BSSIDstr(bestIdx));
+    Serial.print(F(" (channel "));
+    Serial.print(WiFi.channel(bestIdx));
+    Serial.println(F(")"));
+    WiFi.begin(ssid.c_str(), pass.c_str(), WiFi.channel(bestIdx), WiFi.BSSID(bestIdx));
+  } else {
+    Serial.println(F("  no AP broadcasting this SSID was found in the scan - trying unpinned connect anyway"));
+    WiFi.begin(ssid.c_str(), pass.c_str());
+  }
+
+  WiFi.scanDelete(); // free the scan result memory, no longer needed
+  return found;
+}
+
+// ================================================================
 //                            setup()
 // ================================================================
 void setup() {
@@ -426,7 +508,11 @@ void setup() {
     Serial.println(ssid);
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
+#if WIFI_SCAN_FIRST
+    connectToStrongestAp(ssid, pass);
+#else
     WiFi.begin(ssid.c_str(), pass.c_str());
+#endif
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
       delay(250);
@@ -584,7 +670,7 @@ void startApMode() {
   Serial.println(F("No (working) WiFi credentials - AP mode started."));
   Serial.print(F("Connect to network '"));
   Serial.print(AP_SSID);
-  Serial.println(F("' and go to http://192.168.4.1/"));
+  Serial.println(F("' and go to http://192.168.4.1/ (use your phone; on iPhone, use Safari)"));
 
   server.on("/", HTTP_GET, handleApRoot);
   server.on("/save", HTTP_POST, handleApSave);
@@ -708,6 +794,18 @@ void handleSetupSave() {
 
 void handleApiStatus() {
   server.sendHeader("Cache-Control", "no-store");
+  // "Connection: close" forces every request to use a fresh TCP
+  // connection instead of HTTP keep-alive. The simple (single-client,
+  // synchronous) ESP32 WebServer doesn't reliably juggle several
+  // persistent connections at once, and this endpoint gets polled every
+  // 300ms while /api/ptt may ALSO be getting keepalive-polled every
+  // 250ms at the same time (while the web-PTT button is held) - under
+  // that concurrent load a kept-alive connection can get "stuck" and
+  // starve the other endpoint, which showed up as the web-PTT output
+  // cycling on/off via the WEB_PTT_TIMEOUT_MS fail-safe even on a
+  // perfectly fine WiFi link. Closing the connection after every
+  // response avoids that.
+  server.sendHeader("Connection", "close");
   // Fixed buffer instead of String concatenation: this endpoint is
   // requested by the page every 300ms. "cg" indicates whether the
   // callgever is currently transmitting its morse ID. "rssi" is the WiFi
@@ -726,6 +824,7 @@ void handleApiStatus() {
 
 void handleApiPtt() {
   server.sendHeader("Cache-Control", "no-store");
+  server.sendHeader("Connection", "close"); // see handleApiStatus() for why
   if (server.hasArg("on")) {
     webPtt = (server.arg("on") == "1");
     lastWebPttPing = millis();
@@ -861,10 +960,17 @@ void handleCallgeverPage() {
   html += "<div class='rowval'><span>400 Hz</span><span id='freqval'>" + String(cg.freqHz) + " Hz</span><span>1500 Hz</span></div>";
 
   html += F("<label for='didelay'>Delay after PTT start</label>");
-  html += "<input type='range' id='didelay' name='didelay' min='0' max='50000' step='10' value='" +
-          String(cg.delayMs) +
-          "' oninput=\"document.getElementById('didelayval').innerText=this.value+' ms'\">";
-  html += "<div class='rowval'><span>0 ms</span><span id='didelayval'>" + String(cg.delayMs) + " ms</span><span>50000 ms</span></div>";
+  // The slider itself works in whole seconds now (used to be raw ms, which
+  // made the default "25000 ms" look odd) - cg.delayMs internally is still
+  // stored/used in milliseconds (see cgUpdate()), so this is purely a
+  // display/input-unit change: the submitted value is converted back to ms
+  // in handleCallgeverSave(). Rounded to the nearest second for display,
+  // in case a value from the old ms-based slider isn't an exact multiple
+  // of 1000.
+  html += "<input type='range' id='didelay' name='didelay' min='0' max='50' step='1' value='" +
+          String((cg.delayMs + 500) / 1000) +
+          "' oninput=\"document.getElementById('didelayval').innerText=this.value+' s'\">";
+  html += "<div class='rowval'><span>0 s</span><span id='didelayval'>" + String((cg.delayMs + 500) / 1000) + " s</span><span>50 s</span></div>";
 
   html += F("</div>"); // card
 
@@ -951,7 +1057,9 @@ void handleCallgeverSave() {
   if (server.hasArg("freq"))
     cg.freqHz = (uint16_t)cgClamp(server.arg("freq").toInt(), 400, 1500);
   if (server.hasArg("didelay"))
-    cg.delayMs = (uint16_t)cgClamp(server.arg("didelay").toInt(), 0, 50000);
+    // Slider now submits whole seconds (see handleCallgeverPage()) - convert
+    // back to ms, which is what cg.delayMs is actually stored/used in.
+    cg.delayMs = (uint16_t)cgClamp(server.arg("didelay").toInt() * 1000, 0, 50000);
   if (server.hasArg("attackms"))
     cg.attackMs = (uint8_t)cgClamp(server.arg("attackms").toInt(), 1, 20);
   if (server.hasArg("releasems"))
@@ -978,6 +1086,7 @@ void handleCallgeverTest() {
 // as the tone sounds - see updatePttOutput().
 void handleCallgeverTone() {
   server.sendHeader("Cache-Control", "no-store");
+  server.sendHeader("Connection", "close"); // see handleApiStatus() for why
 
   if (server.hasArg("on") && server.arg("on") == "1") {
     if (morse.isPlaying()) {
@@ -1240,4 +1349,32 @@ void cgUpdate() {
         // the ID: wait for release (or, on a long uninterrupted PTT, the
         // mandatory periodic repeat below in CG_WAIT_RELEASE).
         cgState = pttNow ? CG_WAIT_RELEASE : CG_IDLE;
-        if (cgState == CG_IDLE) cgRepeatCoun
+        if (cgState == CG_IDLE) cgRepeatCount = 0;
+      }
+      break;
+
+    case CG_WAIT_RELEASE:
+      // PTT is still on (otherwise we would already have gone to CG_IDLE
+      // above). For as long as that stays true, the callgever must
+      // re-identify every CG_REPEAT_INTERVAL_MS, starting
+      // CG_REPEAT_FIRST_MS after the moment the PTT first went on.
+      if (!cg.enabled) break;
+      if (!pttNow) break;              // would already have been handled above
+      if (manualToneOn) break;         // manual tone takes priority
+      if (morse.isPlaying()) break;    // just in case, shouldn't happen
+      {
+        unsigned long threshold = CG_REPEAT_FIRST_MS +
+                                   (unsigned long)cgRepeatCount * CG_REPEAT_INTERVAL_MS;
+        if ((millis() - cgArmedAtMs) >= threshold) {
+          cgApplyAudioSettings();
+          morse.play(cg.callsign);
+          cgRepeatCount++;
+          cgState = CG_TRANSMITTING;
+        }
+      }
+      break;
+
+    default:
+      break;
+  }
+}
