@@ -326,6 +326,9 @@ treat the broker the same as the web page (see Limitations below).
 
 - **Add a wiring diagram** - the wiring table is there, but a proper
   schematic would make assembly a lot easier to follow.
+- **Add a schematic for the base station (ESP32) side** - the remote
+  module now has wiring photos, but the fixed/base side (ESP32 + base
+  HM-10 module, PTT relay, audio coupling) still needs a proper diagram.
 
 ## License
 
