@@ -73,9 +73,10 @@ directly to the ESP32.
 
 **Audio:** GPIO25 idles at about 1.65 V and swings up to 3.3 Vpp. Always
 use a series capacitor to block the DC, and a voltage divider to reduce the
-level to what your mic input expects. To keep your voice and the CW-ID from
-mixing, you can switch the mic input over to the DAC during the ID with a
-small relay or analogue switch.
+level to what your mic input expects. The DAC audio is simply mixed
+together with your mic audio onto the same line: the CW-ID starts after
+the configured delay and stays audible under your voice for as long as it
+plays - no switching needed.
 
 **PTT polarity:** the PTT output is active-high by default. For an
 active-low output, set `PTT_ACTIVE_HIGH` to `false` in the sketch.
