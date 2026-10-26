@@ -71,6 +71,20 @@ PTT knob) and the component models used to design it are in
 Power the HM-10 modules from 3.3 V. Their logic is 3.3 V, so they connect
 directly to the ESP32.
 
+**Remote module wiring (photos):** the PIO3 pull-down resistor and the
+power-LED removal on the remote's HM-10 module, plus the TP4056 charger
+board wiring (B+/B-, OUT+/OUT-, and the switch tap).
+
+<p>
+<img src="images/wiring-remote-overview.jpg" width="190" alt="Remote enclosure opened up: HM-10 module, on/off switch and TP4056 board wired together">
+<img src="images/wiring-hm10-pio3-pulldown-1.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor">
+<img src="images/wiring-hm10-pio3-pulldown-2.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor, alternate angle">
+<img src="images/wiring-hm10-pio3-pulldown-3.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor, close-up">
+<img src="images/wiring-hm10-detail-1.jpg" width="190" alt="HM-10 remote module wiring detail">
+<img src="images/wiring-detail-closeup-2.jpg" width="190" alt="Solder joint close-up on the remote module">
+<img src="images/wiring-tp4056-board.jpg" width="190" alt="TP4056 charger board, B+/B- and OUT+/OUT- wiring">
+</p>
+
 **Audio:** GPIO25 idles at about 1.65 V and swings up to 3.3 Vpp. Always
 use a series capacitor to block the DC, and a voltage divider to reduce the
 level to what your mic input expects. The DAC audio is simply mixed
@@ -80,6 +94,19 @@ plays - no switching needed.
 
 **PTT polarity:** the PTT output is active-high by default. For an
 active-low output, set `PTT_ACTIVE_HIGH` to `false` in the sketch.
+
+### Remote power
+
+- **Battery**: 2× **582728** Li-Po cells (400 mAh each), wired in
+  **parallel** into the TP4056 charger board (~800 mAh total) - plenty for
+  days of QSO use between charges.
+- The **on/off switch** sits in the **positive line between the charger
+  board and the HM-10 module** - it only switches the HM-10 off, the
+  battery keeps charging normally with the switch off.
+- The HM-10's own **power LED has been removed** (desoldered) to cut
+  standby drain.
+
+<img src="images/battery-label-582728.jpg" width="220" alt="Battery label: 582728, 3.7V 400mAh">
 
 ## HM-10 configuration
 
@@ -284,11 +311,14 @@ treat the broker the same as the web page (see Limitations below).
   charging by default, which is far too much for the Li-Po cell(s) used
   here. Add a section explaining how to modify the module (resistor swap)
   for a safe, lower charge current.
-- **Specify the battery/batteries used** in the remote (type, capacity,
-  cell count) - not documented yet.
 - **Document a UV-curing-glue lightpipe** for the charge LEDs: explain how
   to make a lightpipe with UV-curing glue so the TP4056 charge LEDs stay
   visible from outside the handheld enclosure.
+
+  <p>
+  <img src="images/lightpipe-glue-over-leds.jpg" width="190" alt="UV-curing glue dome over the TP4056 charge LEDs">
+  <img src="images/lightpipe-enclosure-hole.jpg" width="190" alt="Lightpipe viewing hole in the enclosure wall, battery visible behind it">
+  </p>
 - **Add a wiring diagram** - the wiring table is there, but a proper
   schematic would make assembly a lot easier to follow.
 
