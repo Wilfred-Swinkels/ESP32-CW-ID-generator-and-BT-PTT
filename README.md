@@ -34,6 +34,12 @@ publishes/controllable over MQTT - see
 
 ## Hardware
 
+> **Note:** the ESP32 itself has Bluetooth built in. This project uses two
+> separate HM-10 modules anyway, because their simple point-to-point link
+> (one paired as central, one as peripheral) does the whole wireless PTT
+> connection with plain AT commands - no custom BLE/GATT code needed on the
+> ESP32 side.
+
 | Part | Notes |
 |---|---|
 | Classic ESP32 dev board (WROOM/WROVER) | **Must be a classic ESP32**: the S2, S3, C3 and C6 have no DAC. |
