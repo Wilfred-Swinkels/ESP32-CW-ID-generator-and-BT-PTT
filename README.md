@@ -1,5 +1,7 @@
 # ESP32 CW-ID Generator + Bluetooth Remote PTT
 
+By **ON4NDO**.
+
 ![Remote PTT enclosure, CAD render](3Dmodels/bt-ptt.jpg)
 
 Firmware for a classic ESP32 that does two things:
