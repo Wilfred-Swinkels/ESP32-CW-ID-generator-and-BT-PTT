@@ -60,10 +60,27 @@
     level before connecting it alongside (or instead of) the microphone
     signal on the transmitter - see README.md.
 
-  Required libraries: all already included in the ESP32 board package
-  (WiFi, WebServer, Preferences, ESPmDNS) - nothing extra to install,
-  except for the included morse.h/.cpp and audio_dac.h/.cpp files in this
-  folder.
+  PART 5 - MQTT (publish + control), NEW
+  -----------------------------------------------------
+    Everything the web page can show or change - PTT state, link/CW-ID
+    status, RSSI/uptime, and every callgever setting (enabled, callsign,
+    volume, WPM, frequency, delay, attack, release, abort-on-release) - is
+    also available over MQTT: published as one JSON state message, and
+    settable via per-field ".../set" command topics. Home Assistant MQTT
+    Discovery is used so the device appears automatically as a set of
+    entities (switches/numbers/text/sensors) grouped under one device in
+    HA, without having to hand-write any YAML. WiFi/MQTT passwords are
+    deliberately never published over MQTT. MQTT only runs in station
+    mode (not during AP setup) and only if a broker host is configured on
+    the /setup page; see the "MQTT" section below for the topic layout.
+
+  Required libraries: WiFi, WebServer, Preferences and ESPmDNS are all
+  already included in the ESP32 board package - nothing extra to install
+  for those. MQTT needs one extra library: "PubSubClient" by Nick
+  O'Leary - install it via Arduino IDE's Library Manager (Tools ->
+  Manage Libraries..., search "PubSubClient", the one with ~190k+
+  downloads). Also needs the included morse.h/.cpp and audio_dac.h/.cpp
+  files in this folder.
   ================================================================
 */
 #include <WiFi.h>
@@ -71,6 +88,7 @@
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <HardwareSerial.h>
+#include <PubSubClient.h>
 
 #include "morse.h"
 #include "audio_dac.h"
@@ -149,6 +167,22 @@
 // APs being added/moved/replaced) instead of relying on a guess.
 #define WIFI_SCAN_FIRST       1          // 1 = scan and pick strongest AP for our SSID, 0 = plain WiFi.begin()
 
+// ================= Settings: MQTT =================
+// Base topic for state/commands (lowercase, no spaces - safe as an MQTT
+// topic segment). All of this device's own topics live under here, e.g.
+// "esp32-bt-ptt/state" (published) and "esp32-bt-ptt/ptt/set" (subscribed).
+#define MQTT_BASE_TOPIC            "esp32-bt-ptt"
+// Standard Home Assistant MQTT Discovery prefix (HA's own default -
+// matches HA's "MQTT" integration out of the box, nothing to configure
+// on the HA side beyond having the MQTT integration set up at all).
+#define HA_DISCOVERY_PREFIX        "homeassistant"
+#define MQTT_RECONNECT_INTERVAL_MS 5000  // how often to retry a dropped/failed broker connection
+#define MQTT_STATE_PUBLISH_INTERVAL_MS 2000 // periodic full-state publish, on top of on-change publishes
+// PubSubClient's default 256-byte buffer is too small for the discovery
+// config payloads (device info + several fields each) - this must be set
+// before the first connect attempt via mqttClient.setBufferSize().
+#define MQTT_BUFFER_SIZE           1024
+
 // ================= Settings: Callgever (CW-ID) =================
 // NO separate DI pin anymore - the trigger is the combined PTT status
 // above (remotePtt || webPtt). See PART 4 above for the behaviour.
@@ -172,6 +206,33 @@ static const unsigned long CG_TAIL_SILENCE_MS = 500;
 Preferences prefs;
 WebServer   server(80);
 bool        apMode = false;
+
+// ================= Global variables: MQTT =================
+WiFiClient   mqttNetClient;
+PubSubClient mqttClient(mqttNetClient);
+bool         mqttConfigured   = false; // true once a broker host has been loaded from prefs
+String       mqttHost, mqttPort, mqttUser, mqttPass; // cached from prefs, see mqttLoadConfig()
+String       mqttDeviceId;            // unique id for this device, derived from the MAC address
+unsigned long mqttLastReconnectAttempt = 0;
+unsigned long mqttLastStatePublish     = 0;
+bool         mqttDiscoveryPublished = false; // re-sent after every (re)connect; see mqttOnConnected()
+
+// ================================================================
+//                            MQTT topics
+// ================================================================
+// esp32-bt-ptt/availability            "online"/"offline" (retained, LWT)
+// esp32-bt-ptt/state                   one JSON blob with everything, retained - see mqttPublishState()
+// esp32-bt-ptt/ptt/set                 "ON"/"OFF" - third PTT source, alongside remotePtt/webPtt
+// esp32-bt-ptt/cg_enabled/set          "ON"/"OFF"
+// esp32-bt-ptt/cg_abortrel/set         "ON"/"OFF"
+// esp32-bt-ptt/cg_callsign/set         plain text, same rules as the web form (trimmed, uppercased)
+// esp32-bt-ptt/cg_volume/set           0-100
+// esp32-bt-ptt/cg_wpm/set              5-30
+// esp32-bt-ptt/cg_freq/set             400-1500 (Hz)
+// esp32-bt-ptt/cg_delay/set            0-50 (seconds - matches the web slider's unit, not cg.delayMs's ms)
+// esp32-bt-ptt/cg_attack/set           1-20 (ms)
+// esp32-bt-ptt/cg_release/set          1-50 (ms)
+// WiFi/MQTT passwords are intentionally never published - see mqttPublishState().
 
 // ================= Global variables: HM-10 =================
 HardwareSerial HM10(2);   // ESP32 UART2
@@ -198,6 +259,7 @@ unsigned long lastLinkBlinkToggle = 0;
 // ================= Global variables: web PTT and combined output =================
 bool          webPtt         = false;  // manual PTT from the web page
 unsigned long lastWebPttPing = 0;
+bool          mqttPtt        = false;  // manual PTT via MQTT (esp32-bt-ptt/ptt/set) - third source
 bool          outputActive   = false;  // last applied (combined) output state
 
 // ================= Global variables: Callgever (CW-ID) =================
@@ -619,6 +681,22 @@ void loop() {
   // ---- Web server: may run after the time-critical HM-10 handling above ----
   server.handleClient();
 
+  // Re-read the clock after server.handleClient(): that call may itself
+  // have just updated lastWebPttPing/lastManualTonePingMs (if it handled
+  // an incoming /api/ptt or /callgever/tone request) to a FRESH millis()
+  // value - one that can end up slightly LARGER than the stale "now"
+  // captured at the top of this loop() iteration, if handleClient() took
+  // any real time (e.g. a full TCP handshake per request, now that
+  // responses use "Connection: close"). The fail-safe checks below then
+  // compute (now - lastWebPttPing) with now < lastWebPttPing, which
+  // underflows (both are unsigned long) to a huge value - comfortably
+  // above WEB_PTT_TIMEOUT_MS - and incorrectly fires the fail-safe in the
+  // very same loop() pass as the keepalive ping that should have prevented
+  // it. This was the actual cause of the web-PTT "chattering": every
+  // single keepalive ping was immediately undoing itself. Re-fetching now
+  // here guarantees it is never older than any ping timestamp set above.
+  now = millis();
+
   // Blink D19 (1s on/off) for as long as the link with the remote is down
   if (!linkUp && (now - lastLinkBlinkToggle >= LINK_LOST_BLINK_MS)) {
     lastLinkBlinkToggle = now;
@@ -628,9 +706,14 @@ void loop() {
 
   // Fail-safe: no more keepalive received for the web-PTT button
   if (webPtt && (now - lastWebPttPing > WEB_PTT_TIMEOUT_MS)) {
+    unsigned long gapMs = now - lastWebPttPing; // how long it's actually been - for diagnosis
     webPtt = false;
     updatePttOutput();
-    Serial.println(F(">>> Web-PTT fail-safe: no keepalive received, disabled"));
+    Serial.print('[');
+    Serial.print(now);
+    Serial.print(F("] >>> Web-PTT fail-safe: no keepalive received for "));
+    Serial.print(gapMs);
+    Serial.println(F("ms, disabled"));
   }
 
   // Fail-safe: no more keepalive received for the manual tone button
@@ -639,6 +722,9 @@ void loop() {
     audioToneOff();
     updatePttOutput();
   }
+
+  // ---- MQTT: connection housekeeping, incoming commands, periodic state ----
+  mqttHandle(now);
 
   // ---- 5) Callgever: morse timing + trigger state machine ----
   morse.update();
@@ -687,6 +773,8 @@ void startStationMode() {
     Serial.println(F(".local/"));
   }
 
+  mqttSetup(); // only meaningful in station mode - see mqttSetup()
+
   server.on("/", HTTP_GET, handleStaRoot);
   server.on("/setup", HTTP_GET, handleSetupPage);
   server.on("/setup/save", HTTP_POST, handleSetupSave);
@@ -698,6 +786,323 @@ void startStationMode() {
   server.on("/api/ptt", HTTP_GET, handleApiPtt);
   server.on("/api/wifi/reset", HTTP_POST, handleWifiReset);
   server.begin();
+}
+
+// ================================================================
+//                              MQTT
+// ================================================================
+// Publishes everything the web page can show/change over MQTT (one JSON
+// state message + per-field ".../set" command topics), plus Home
+// Assistant MQTT Discovery so it all shows up as entities automatically.
+// See the topic list and the PART 5 header comment near the top of this
+// file for the overview. Only active in station mode and only if a
+// broker host is configured on /setup - see mqttSetup()/mqttHandle().
+
+// Minimal JSON string escaping for the few free-text fields we publish
+// (callsign, SSID) - mirrors htmlEscape() above but for JSON instead of
+// HTML. Keeps a malformed/unexpected value from producing broken JSON.
+String jsonEscape(const String &in) {
+  String out;
+  out.reserve(in.length());
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      default:
+        if ((uint8_t)c < 0x20) { /* skip control chars */ } else { out += c; }
+        break;
+    }
+  }
+  return out;
+}
+
+String mqttTopic(const char* suffix) {
+  String t = MQTT_BASE_TOPIC;
+  t += '/';
+  t += suffix;
+  return t;
+}
+
+// Reads the MQTT broker settings saved via /setup into the cached globals.
+// Called once at boot (via mqttSetup()) and again whenever /setup/save
+// stores new values, so a broker change takes effect without a reboot.
+void mqttLoadConfig() {
+  mqttHost = prefs.getString("mqtt_host", "");
+  mqttPort = prefs.getString("mqtt_port", "1883");
+  if (mqttPort.length() == 0) mqttPort = "1883"; // guard against an empty saved value
+  mqttUser = prefs.getString("mqtt_user", "");
+  mqttPass = prefs.getString("mqtt_pass", "");
+  mqttConfigured = (mqttHost.length() > 0);
+}
+
+// (Re)configures the MQTT client from the current prefs. Safe to call
+// again later (e.g. right after /setup/save) to pick up a changed broker:
+// disconnects any existing session first, then re-applies settings so the
+// next mqttHandle() reconnect attempt uses the new broker.
+void mqttSetup() {
+  if (mqttClient.connected()) mqttClient.disconnect();
+  mqttLoadConfig();
+  if (!mqttConfigured) return;
+
+  if (mqttDeviceId.length() == 0) {
+    String mac = WiFi.macAddress(); // e.g. "AA:BB:CC:DD:EE:FF"
+    mac.replace(":", "");
+    mqttDeviceId = String(MQTT_BASE_TOPIC) + "-" + mac;
+  }
+
+  mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
+  // NOTE: PubSubClient's setServer(const char*, ...) only stores the
+  // pointer it's given, not a copy of the string - this is only safe
+  // because mqttHost is a persistent global that we never reassign
+  // without immediately calling setServer() again right here (see
+  // mqttLoadConfig() above, always called just before this).
+  mqttClient.setServer(mqttHost.c_str(), (uint16_t)mqttPort.toInt());
+  mqttClient.setCallback(mqttCallback);
+  mqttDiscoveryPublished = false;
+  mqttLastReconnectAttempt = 0; // try to connect on the very next mqttHandle()
+}
+
+String mqttDeviceJson() {
+  String j = "{\"identifiers\":[\"";
+  j += mqttDeviceId;
+  j += "\"],\"name\":\"ESP32 BT-PTT (ON4NDO)\",\"model\":\"ESP32 HM-10 Remote PTT + Callgever\",\"manufacturer\":\"ON4NDO\"}";
+  return j;
+}
+
+// Publishes one Home Assistant MQTT Discovery config message (retained).
+// `valueTemplate` is the Jinja2 snippet (without surrounding {{ }} quotes
+// handling needed - just the raw template text) that pulls this entity's
+// value out of the shared esp32-bt-ptt/state JSON. `extraJson` is any
+// additional fields this entity type needs (min/max/unit/device_class/
+// icon/...), as a raw JSON fragment with no leading/trailing comma, or
+// an empty string if nothing extra applies.
+void mqttPublishDiscoveryEntity(const char* component, const char* objectId,
+                                 const char* name, bool hasCommand,
+                                 const String &valueTemplate,
+                                 const String &extraJson) {
+  String configTopic = String(HA_DISCOVERY_PREFIX) + "/" + component + "/" + mqttDeviceId + "/" + objectId + "/config";
+
+  String json;
+  json.reserve(400);
+  json += "{\"name\":\""; json += name; json += "\",";
+  json += "\"unique_id\":\""; json += mqttDeviceId; json += "_"; json += objectId; json += "\",";
+  json += "\"state_topic\":\""; json += mqttTopic("state"); json += "\",";
+  json += "\"availability_topic\":\""; json += mqttTopic("availability"); json += "\",";
+  json += "\"value_template\":\"{{ "; json += valueTemplate; json += " }}\",";
+  if (hasCommand) {
+    json += "\"command_topic\":\""; json += mqttTopic(objectId); json += "/set\",";
+  }
+  if (extraJson.length() > 0) {
+    json += extraJson;
+    json += ",";
+  }
+  json += "\"device\":"; json += mqttDeviceJson();
+  json += "}";
+
+  mqttClient.publish(configTopic.c_str(), json.c_str(), true); // retained
+}
+
+void mqttPublishDiscovery() {
+  if (!mqttClient.connected()) return;
+
+  mqttPublishDiscoveryEntity("switch", "ptt", "PTT", true,
+    "'ON' if value_json.ptt else 'OFF'", "\"icon\":\"mdi:radio-handheld\"");
+  mqttPublishDiscoveryEntity("switch", "cg_enabled", "CW-ID Enabled", true,
+    "'ON' if value_json.cg_enabled else 'OFF'", "\"icon\":\"mdi:radio-tower\"");
+  mqttPublishDiscoveryEntity("switch", "cg_abortrel", "Abort ID On PTT Release", true,
+    "'ON' if value_json.cg_abortrel else 'OFF'", "\"icon\":\"mdi:stop-circle-outline\",\"entity_category\":\"config\"");
+
+  mqttPublishDiscoveryEntity("text", "cg_callsign", "Callsign", true,
+    "value_json.cg_callsign", "\"icon\":\"mdi:account-voice\",\"entity_category\":\"config\",\"pattern\":\"^[A-Za-z0-9/]{1,15}$\"");
+
+  mqttPublishDiscoveryEntity("number", "cg_volume", "CW-ID Volume", true,
+    "value_json.cg_volume", "\"min\":0,\"max\":100,\"step\":1,\"unit_of_measurement\":\"%\",\"mode\":\"slider\",\"icon\":\"mdi:volume-high\"");
+  mqttPublishDiscoveryEntity("number", "cg_wpm", "CW-ID Speed", true,
+    "value_json.cg_wpm", "\"min\":5,\"max\":30,\"step\":1,\"unit_of_measurement\":\"WPM\",\"mode\":\"slider\",\"icon\":\"mdi:speedometer\"");
+  mqttPublishDiscoveryEntity("number", "cg_freq", "CW-ID Tone Frequency", true,
+    "value_json.cg_freq", "\"min\":400,\"max\":1500,\"step\":10,\"unit_of_measurement\":\"Hz\",\"mode\":\"slider\",\"icon\":\"mdi:sine-wave\"");
+  mqttPublishDiscoveryEntity("number", "cg_delay", "CW-ID Delay After PTT", true,
+    "value_json.cg_delay", "\"min\":0,\"max\":50,\"step\":1,\"unit_of_measurement\":\"s\",\"mode\":\"slider\",\"icon\":\"mdi:timer-outline\"");
+  mqttPublishDiscoveryEntity("number", "cg_attack", "CW-ID Attack", true,
+    "value_json.cg_attack", "\"min\":1,\"max\":20,\"step\":1,\"unit_of_measurement\":\"ms\",\"mode\":\"slider\",\"icon\":\"mdi:ramp-up\",\"entity_category\":\"config\"");
+  mqttPublishDiscoveryEntity("number", "cg_release", "CW-ID Release", true,
+    "value_json.cg_release", "\"min\":1,\"max\":50,\"step\":1,\"unit_of_measurement\":\"ms\",\"mode\":\"slider\",\"icon\":\"mdi:ramp-down\",\"entity_category\":\"config\"");
+
+  mqttPublishDiscoveryEntity("binary_sensor", "link", "Remote Link", false,
+    "'ON' if value_json.link else 'OFF'", "\"device_class\":\"connectivity\",\"entity_category\":\"diagnostic\"");
+  mqttPublishDiscoveryEntity("binary_sensor", "cg", "CW-ID Transmitting", false,
+    "'ON' if value_json.cg else 'OFF'", "\"icon\":\"mdi:waveform\"");
+
+  mqttPublishDiscoveryEntity("sensor", "rssi", "WiFi Signal", false,
+    "value_json.rssi", "\"device_class\":\"signal_strength\",\"unit_of_measurement\":\"dBm\",\"entity_category\":\"diagnostic\",\"state_class\":\"measurement\"");
+  mqttPublishDiscoveryEntity("sensor", "uptime", "Uptime", false,
+    "value_json.uptime", "\"device_class\":\"duration\",\"unit_of_measurement\":\"s\",\"entity_category\":\"diagnostic\",\"state_class\":\"measurement\"");
+  mqttPublishDiscoveryEntity("sensor", "ssid", "WiFi SSID", false,
+    "value_json.ssid", "\"icon\":\"mdi:wifi\",\"entity_category\":\"diagnostic\"");
+
+  mqttDiscoveryPublished = true;
+  Serial.println(F(">>> MQTT: Home Assistant discovery configs published"));
+}
+
+// Publishes the full current state as one retained JSON message. Called
+// right after (re)connecting, periodically (MQTT_STATE_PUBLISH_INTERVAL_MS,
+// see mqttHandle()), and immediately on a PTT change (see
+// updatePttOutput()) or a settings change via MQTT (see mqttCallback()).
+// Deliberately does NOT include wifi_pass/mqtt_pass or anything else
+// security-sensitive - only what the web page itself already shows.
+void mqttPublishState() {
+  if (!mqttConfigured || !mqttClient.connected()) return;
+
+  String json;
+  json.reserve(420);
+  json += "{";
+  json += "\"ptt\":";          json += (outputActive ? "true" : "false");
+  json += ",\"link\":";        json += (linkUp ? "true" : "false");
+  json += ",\"cg\":";          json += (morse.isPlaying() ? "true" : "false");
+  json += ",\"rssi\":";        json += String(apMode ? 0 : WiFi.RSSI());
+  json += ",\"uptime\":";      json += String(millis() / 1000UL);
+  json += ",\"ssid\":\"";      json += jsonEscape(apMode ? String("") : WiFi.SSID()); json += "\"";
+  json += ",\"cg_enabled\":";  json += (cg.enabled ? "true" : "false");
+  json += ",\"cg_callsign\":\""; json += jsonEscape(String(cg.callsign)); json += "\"";
+  json += ",\"cg_volume\":";   json += String(cg.volume);
+  json += ",\"cg_wpm\":";      json += String(cg.wpm);
+  json += ",\"cg_freq\":";     json += String(cg.freqHz);
+  json += ",\"cg_delay\":";    json += String((cg.delayMs + 500) / 1000); // seconds - matches the web slider's unit
+  json += ",\"cg_attack\":";   json += String(cg.attackMs);
+  json += ",\"cg_release\":";  json += String(cg.releaseMs);
+  json += ",\"cg_abortrel\":"; json += (cg.abortOnRelease ? "true" : "false");
+  json += "}";
+
+  mqttClient.publish(mqttTopic("state").c_str(), json.c_str(), true); // retained
+}
+
+// Attempts one (rate-limited, see mqttHandle()) connection to the broker.
+// PubSubClient's connect() itself blocks for the duration of the TCP
+// handshake/CONNACK - typically well under a second on a healthy network,
+// worse case a few seconds on a timeout - which is fine here since this
+// only runs occasionally (every MQTT_RECONNECT_INTERVAL_MS while
+// disconnected), not on every loop() iteration like the HM-10/web-PTT
+// handling above.
+void mqttReconnect() {
+  String willTopic = mqttTopic("availability");
+  const char* userC = mqttUser.length() > 0 ? mqttUser.c_str() : nullptr;
+  const char* passC = mqttPass.length() > 0 ? mqttPass.c_str() : nullptr;
+
+  bool ok = mqttClient.connect(mqttDeviceId.c_str(), userC, passC,
+                                willTopic.c_str(), 0, true, "offline");
+  if (!ok) {
+    Serial.print(F(">>> MQTT connect failed, rc="));
+    Serial.println(mqttClient.state());
+    return;
+  }
+
+  Serial.println(F(">>> MQTT connected"));
+  mqttClient.publish(willTopic.c_str(), "online", true); // retained - cleared to "offline" via the LWT on disconnect
+
+  static const char* CMD_OBJECT_IDS[] = {
+    "ptt", "cg_enabled", "cg_abortrel", "cg_callsign",
+    "cg_volume", "cg_wpm", "cg_freq", "cg_delay", "cg_attack", "cg_release"
+  };
+  for (size_t i = 0; i < sizeof(CMD_OBJECT_IDS) / sizeof(CMD_OBJECT_IDS[0]); i++) {
+    mqttClient.subscribe((mqttTopic(CMD_OBJECT_IDS[i]) + "/set").c_str());
+  }
+
+  mqttPublishDiscovery();
+  mqttPublishState();
+}
+
+// Handles one incoming MQTT message. Settings are applied with exactly
+// the same clamping/validation as the web form (handleCallgeverSave()) so
+// behaviour stays consistent regardless of which interface was used, and
+// persisted to flash the same way (cgSaveConfig()) so a value set via
+// MQTT also survives a reboot.
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String payloadStr;
+  payloadStr.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++) payloadStr += (char)payload[i];
+  payloadStr.trim();
+
+  String base = mqttTopic("");
+  String t = String(topic);
+  if (!t.startsWith(base)) return;
+  String suffix = t.substring(base.length());
+
+  bool isOn = payloadStr.equalsIgnoreCase("ON") || payloadStr == "1" || payloadStr.equalsIgnoreCase("true");
+
+  if (suffix == "ptt/set") {
+    mqttPtt = isOn;
+    updatePttOutput(); // publishes state itself when this actually changes anything
+    return;
+  }
+
+  bool cgChanged = false;
+  if (suffix == "cg_enabled/set") {
+    cg.enabled = isOn; cgChanged = true;
+  } else if (suffix == "cg_abortrel/set") {
+    cg.abortOnRelease = isOn; cgChanged = true;
+  } else if (suffix == "cg_callsign/set") {
+    String cs = payloadStr;
+    cs.trim();
+    cs.toUpperCase();
+    if (cs.length() > 0) {
+      strncpy(cg.callsign, cs.c_str(), sizeof(cg.callsign) - 1);
+      cg.callsign[sizeof(cg.callsign) - 1] = '\0';
+      cgChanged = true;
+    }
+  } else if (suffix == "cg_volume/set") {
+    cg.volume = (uint8_t)cgClamp(payloadStr.toInt(), 0, 100); cgChanged = true;
+  } else if (suffix == "cg_wpm/set") {
+    cg.wpm = (uint8_t)cgClamp(payloadStr.toInt(), 5, 30); cgChanged = true;
+  } else if (suffix == "cg_freq/set") {
+    cg.freqHz = (uint16_t)cgClamp(payloadStr.toInt(), 400, 1500); cgChanged = true;
+  } else if (suffix == "cg_delay/set") {
+    // Payload is in SECONDS (matches the web slider's unit, see
+    // handleCallgeverPage()) - convert to the ms cg.delayMs is stored in.
+    cg.delayMs = (uint16_t)cgClamp(payloadStr.toInt() * 1000, 0, 50000); cgChanged = true;
+  } else if (suffix == "cg_attack/set") {
+    cg.attackMs = (uint8_t)cgClamp(payloadStr.toInt(), 1, 20); cgChanged = true;
+  } else if (suffix == "cg_release/set") {
+    cg.releaseMs = (uint8_t)cgClamp(payloadStr.toInt(), 1, 50); cgChanged = true;
+  }
+
+  if (cgChanged) {
+    // Same pattern as handleCallgeverSave(): always save + re-apply audio
+    // settings, regardless of which single field actually changed.
+    cgSaveConfig();
+    cgApplyAudioSettings();
+    mqttPublishState();
+  }
+}
+
+// Called every loop() iteration (see loop()). No-op if MQTT isn't
+// configured or we're in AP setup mode (no real network to reach a
+// broker on). While disconnected, forces mqttPtt off immediately - unlike
+// webPtt/manualToneOn (which use a press-and-hold keepalive with its own
+// timeout), MQTT PTT is an explicit on/off command with no keepalive, so
+// losing the broker connection is its equivalent safety net: no live
+// MQTT link means no way to send the "off" command either.
+void mqttHandle(unsigned long now) {
+  if (!mqttConfigured || apMode) return;
+
+  if (!mqttClient.connected()) {
+    if (mqttPtt) {
+      mqttPtt = false;
+      updatePttOutput();
+      Serial.println(F(">>> MQTT disconnected while PTT was active via MQTT - forced off"));
+    }
+    if (now - mqttLastReconnectAttempt >= MQTT_RECONNECT_INTERVAL_MS) {
+      mqttLastReconnectAttempt = now;
+      mqttReconnect();
+    }
+    return;
+  }
+
+  mqttClient.loop();
+  if (now - mqttLastStatePublish >= MQTT_STATE_PUBLISH_INTERVAL_MS) {
+    mqttLastStatePublish = now;
+    mqttPublishState();
+  }
 }
 
 // ================================================================
@@ -788,6 +1193,9 @@ void handleSetupSave() {
   // button on /callgever was still being held down, the tone needs to be
   // started again.
   if (manualToneOn) audioToneOn();
+  // Pick up the (possibly changed) broker settings right away instead of
+  // requiring a reboot - see mqttSetup().
+  mqttSetup();
   server.sendHeader("Location", "/setup?saved=1");
   server.send(303);
 }
@@ -829,6 +1237,17 @@ void handleApiPtt() {
     webPtt = (server.arg("on") == "1");
     lastWebPttPing = millis();
     updatePttOutput();
+    // Logs every single incoming /api/ptt request (on=1 while the button is
+    // held, roughly every 250ms - see pttOn() in MAIN_PAGE). Temporary/
+    // cheap diagnostic for the web-PTT "chattering" issue: comparing the
+    // timestamps of these lines against a later fail-safe line shows
+    // exactly how big the actual gap was and whether requests stopped
+    // arriving at the server at all, or arrived but something else then
+    // still let the fail-safe fire.
+    Serial.print('[');
+    Serial.print(lastWebPttPing);
+    Serial.print(F("] /api/ptt?on="));
+    Serial.println(webPtt ? '1' : '0');
   }
   server.send(200, "text/plain", "OK");
 }
@@ -1169,19 +1588,34 @@ void setLinkPinsLost() {
   lastLinkBlinkToggle = millis();
 }
 
-// Combines the three independent sources (remote via BLE, the web page,
-// and the callgever transmitting on its own) into one PTT output state.
+// Combines the four independent sources (remote via BLE, the web page,
+// MQTT, and the callgever transmitting on its own) into one PTT output
+// state.
 void updatePttOutput() {
   // cgState == CG_TAIL: the ID has finished playing (so morse.isPlaying()
   // is already false), but we want to keep the PTT output active a
   // little longer (CG_TAIL_SILENCE_MS) for the tail silence - hence this
   // is explicitly included here.
-  bool want = remotePtt || webPtt || morse.isPlaying() || manualToneOn || (cgState == CG_TAIL);
+  bool want = remotePtt || webPtt || mqttPtt || morse.isPlaying() || manualToneOn || (cgState == CG_TAIL);
   if (want != outputActive) {
     outputActive = want;
     applyPttOutput(outputActive);
-    Serial.print(F(">>> PTT output "));
+    // [millis()] prefix added for diagnosing the web-PTT "chattering"
+    // issue: without a timestamp, consecutive ON/OFF/fail-safe log lines
+    // don't show whether this was a genuine >3s keepalive gap or something
+    // much shorter, which makes it impossible to tell a weak-WiFi dropout
+    // apart from a server-side hiccup from the log alone.
+    Serial.print('[');
+    Serial.print(millis());
+    Serial.print(F("] >>> PTT output "));
     Serial.println(outputActive ? F("ON") : F("OFF"));
+    // Mirror the change to MQTT immediately (on top of the periodic
+    // publish in loop()) so Home Assistant reflects PTT keying with low
+    // latency instead of waiting up to MQTT_STATE_PUBLISH_INTERVAL_MS.
+    // Deliberately INSIDE this if-block, not after it: updatePttOutput()
+    // itself runs every single loop() iteration, so publishing here
+    // unconditionally would flood the broker with identical messages.
+    mqttPublishState();
   }
 }
 

@@ -1,5 +1,7 @@
 # ESP32 CW-ID Generator + Bluetooth Remote PTT
 
+![Remote PTT enclosure, CAD render](3Dmodels/bt-ptt.jpg)
+
 Firmware for a classic ESP32 that does two things:
 
 1. **Remote PTT** – a wireless push-to-talk button, built from a pair of
@@ -8,19 +10,24 @@ Firmware for a classic ESP32 that does two things:
    code as an audio tone (from the built-in DAC) and holds PTT until the ID is
    finished.
 
-Everything is configured from a built-in web page: no app, no extra
-libraries.
+Everything is configured from a built-in web page: no app. Also optionally
+publishes/controllable over MQTT - see
+[MQTT / Home Assistant](#mqtt--home-assistant).
 
 ## Features
 
 - Wireless PTT via two HM-10 BLE modules, plus a PTT button on the web page.
-- Automatic CW-ID on key-up, after a configurable delay (0–25 s).
+- Automatic CW-ID on key-up, after a configurable delay (0–50 s).
 - If PTT is held continuously, the ID is repeated automatically every 5 minutes.
 - Adjustable callsign, speed (5–30 WPM), tone (400–1500 Hz), volume and
   attack/release envelope (no key clicks).
 - Test buttons for the full ID and for a plain tone.
 - Settings are stored in flash and survive a reboot.
 - Status LEDs for PTT and for the Bluetooth link.
+- MQTT: publishes PTT/link/CW-ID state and every CW-ID setting, and lets you
+  control all of it back (including PTT itself) - with Home Assistant MQTT
+  Discovery, so it shows up as a device with ready-made entities. See
+  [MQTT / Home Assistant](#mqtt--home-assistant).
 
 ## Hardware
 
@@ -31,6 +38,10 @@ libraries.
 | Push button + 10 kΩ resistor | For the remote. |
 | NPN transistor + relay (or optocoupler) | Switches the transmitter's PTT line. |
 | 1–10 µF capacitor + resistor divider (e.g. 10 kΩ / 1 kΩ) | Brings the DAC audio down to microphone level. |
+
+**Enclosure**: STEP files for a 3D-printable remote housing (top, bottom,
+PTT knob) and the component models used to design it are in
+[`3Dmodels/`](3Dmodels/).
 
 ### Wiring
 
@@ -129,11 +140,8 @@ should answer `OK+PIO3:0` and `OK+PIO3:1` as you release and press it.
 
 Both modules must stay at the default **9600 baud** (`AT+BAUD0`).
 
-> Notes:
-> - Command details differ slightly between HMSoft firmware versions. If a
->   command is rejected, check the datasheet for your firmware version.
-> - This guide was written from the firmware's behaviour and the HM-10
->   datasheet. The full setup has not yet been confirmed on real hardware.
+> Note: command details differ slightly between HMSoft firmware versions. If
+> a command is rejected, check the datasheet for your firmware version.
 
 ## Installing the firmware
 
@@ -142,42 +150,49 @@ Both modules must stay at the default **9600 baud** (`AT+BAUD0`).
 2. The Arduino IDE requires the folder name to match the sketch name. Put all
    `.ino`, `.cpp` and `.h` files from this repository in a folder named
    **`esp32_callgever_ptt`**.
-3. Open `esp32_callgever_ptt.ino`, select **ESP32 Dev Module** (or your
-   board) and upload. No extra libraries are needed.
-4. Open the Serial Monitor at 115200 baud to watch the log.
+3. Install one extra library via **Tools → Manage Libraries...**: search for
+   **PubSubClient** (by Nick O'Leary) and install it - needed for MQTT.
+   Everything else (WiFi, WebServer, Preferences, ESPmDNS) is already
+   included in the esp32 board package.
+4. Open `esp32_callgever_ptt.ino`, select **ESP32 Dev Module** (or your
+   board) and upload.
+5. Open the Serial Monitor at 115200 baud to watch the log.
 
 ## First start
 
 1. With no Wi-Fi saved, the ESP32 starts its own access point,
-   **`ESP32-PTT-Setup`**. Connect to it and open `http://192.168.4.1/`.
+   **`ESP32-BT-PTT-Setup`**. Connect to it (on a phone, use Safari if on
+   iOS) and open `http://192.168.4.1/`.
 2. Enter your Wi-Fi network name and password. The ESP32 restarts and joins
-   your network. If it cannot connect within 15 seconds, it goes back to the
-   setup access point.
-3. Open **`http://esp32-ptt.local/`**, or the IP address shown in the Serial
-   Monitor.
+   your network. If several access points broadcast the same network name,
+   it scans first and connects to whichever one currently has the
+   strongest signal. If it cannot connect within 15 seconds, it goes back
+   to the setup access point.
+3. Open **`http://esp32-BT-PTT.local/`**, or the IP address shown in the
+   Serial Monitor.
 4. Go to **CW-ID settings** and **set your own callsign** (the default is
-   `PD0TEST`).
+   `ON4TEST`).
 
 ## Web interface
 
 | Page | Purpose |
 |---|---|
-| `/` | Status of PTT, the Bluetooth link and the CW-ID, plus a hold-to-talk PTT button |
+| `/` | Status of PTT, the Bluetooth link and the CW-ID, plus a hold-to-talk PTT button and the WiFi signal strength |
 | `/callgever` | CW-ID settings, test ID and test tone |
-| `/setup` | MQTT settings (stored but not used yet, see limitations) |
+| `/setup` | MQTT broker settings - see [MQTT / Home Assistant](#mqtt--home-assistant) |
 
 ### CW-ID settings
 
 | Setting | Range | Default |
 |---|---|---|
-| Callsign | up to 15 characters | `PD0TEST` |
+| Callsign | up to 15 characters | `ON4TEST` |
 | Enabled | on / off | on |
 | Volume | 0–100 % | 70 % |
 | Speed | 5–30 WPM | 15 WPM |
 | Tone | 400–1500 Hz | 800 Hz |
-| Delay after key-up | 0–25000 ms | 25000 ms |
+| Delay after key-up | 0–50 s | 25 s |
 | Attack | 1–20 ms | 1 ms |
-| Release | 10–100 ms | 10 ms |
+| Release | 1–50 ms | 10 ms |
 | Releasing PTT aborts the ID | on / off | off |
 
 At higher speeds a dot can be shorter than the release time (at 20 WPM a dot
@@ -200,16 +215,54 @@ release time and speed together.
 - **"Test ID"** really keys the transmitter. Make sure that is what you want
   when a radio is connected.
 
+## MQTT / Home Assistant
+
+Configure a broker on the `/setup` page (host, port, optional username/
+password) and the ESP32 publishes its full state and lets you control it
+back over MQTT - PTT, every CW-ID setting, and read-only status (link,
+RSSI, uptime, SSID). It only connects in station mode (not during AP
+setup), reconnects automatically if the broker drops, and forces PTT off
+if the MQTT connection itself is lost while PTT was on via MQTT.
+
+**Home Assistant**: if you use Home Assistant with its MQTT integration
+already set up, this device appears automatically (MQTT Discovery) as one
+device with a PTT switch, CW-ID switches (enabled / abort-on-release), a
+callsign text field, number sliders for volume/speed/tone/delay/attack/
+release, and sensors for the link, CW-ID-transmitting, RSSI, uptime and
+SSID - no YAML needed.
+
+**Topics** (base `esp32-bt-ptt/`, broker-relative):
+
+| Topic | Direction | Payload |
+|---|---|---|
+| `esp32-bt-ptt/availability` | published, retained | `online` / `offline` (last-will) |
+| `esp32-bt-ptt/state` | published, retained | one JSON object with everything (`ptt`, `link`, `cg`, `rssi`, `uptime`, `ssid`, `cg_enabled`, `cg_callsign`, `cg_volume`, `cg_wpm`, `cg_freq`, `cg_delay`, `cg_attack`, `cg_release`, `cg_abortrel`) |
+| `esp32-bt-ptt/ptt/set` | subscribed | `ON` / `OFF` |
+| `esp32-bt-ptt/cg_enabled/set` | subscribed | `ON` / `OFF` |
+| `esp32-bt-ptt/cg_abortrel/set` | subscribed | `ON` / `OFF` |
+| `esp32-bt-ptt/cg_callsign/set` | subscribed | plain text (trimmed, uppercased) |
+| `esp32-bt-ptt/cg_volume/set` | subscribed | `0`–`100` |
+| `esp32-bt-ptt/cg_wpm/set` | subscribed | `5`–`30` |
+| `esp32-bt-ptt/cg_freq/set` | subscribed | `400`–`1500` |
+| `esp32-bt-ptt/cg_delay/set` | subscribed | `0`–`50` (seconds) |
+| `esp32-bt-ptt/cg_attack/set` | subscribed | `1`–`20` (ms) |
+| `esp32-bt-ptt/cg_release/set` | subscribed | `1`–`50` (ms) |
+
+Settings changed via MQTT are validated/clamped exactly like the web form
+and saved to flash the same way. **WiFi and MQTT passwords are never
+published.** There's no MQTT authentication/TLS beyond username+password -
+treat the broker the same as the web page (see Limitations below).
+
 ## Limitations
 
 - **No authentication**: anyone on your network (or on the setup access
-  point) can change settings and key the transmitter.
-- **MQTT** settings can be saved, but no MQTT connection is made yet.
+  point, or your MQTT broker) can change settings and key the transmitter.
 - The remote button is polled over the Bluetooth link, so a very short press
   (shorter than one poll round trip, typically a few tens of milliseconds)
   could be missed.
-- **Not yet tested on real hardware.** Please open an issue if you run into
-  problems when compiling or using it.
+- Tested and in daily use on real hardware (ESP32 + HM-10 + a UniFi home
+  network). Please open an issue if you run into problems when compiling or
+  using it.
 
 ## License
 
