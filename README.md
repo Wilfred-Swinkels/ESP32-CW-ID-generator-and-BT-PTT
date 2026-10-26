@@ -6,8 +6,9 @@ Firmware for a classic ESP32 that does two things:
 
 1. **Remote PTT** – a wireless push-to-talk button, built from a pair of
    HM-10 Bluetooth LE modules, keys your transmitter through a relay.
-2. **CW-ID** – every time you key up, the ESP32 sends your callsign in Morse
-   code as an audio tone (from the built-in DAC) and holds PTT until the ID is
+2. **CW-ID** – every time you key up, the ESP32 starts sending your callsign
+   in Morse code as an audio tone (from the built-in DAC) after a delay you
+   set on the web interface, and by default holds PTT until the ID is
    finished.
 
 Everything is configured from a built-in web page: no app. Also optionally
