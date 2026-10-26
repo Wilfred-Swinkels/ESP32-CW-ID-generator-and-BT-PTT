@@ -314,6 +314,7 @@ treat the broker the same as the web page (see Limitations below).
 
   <p>
   <img src="images/wiring-detail-closeup-2.jpg" width="190" alt="TP4056 charge-current-setting resistor (ISET)">
+  <img src="images/lightpipe-glue-over-leds.jpg" width="190" alt="UV-curing glue dome over the TP4056 charge LEDs, next to the ISET resistor">
   <img src="images/wiring-tp4056-board.jpg" width="190" alt="TP4056 charger board overview, B+/B- and OUT+/OUT- wiring">
   </p>
 - **Document a UV-curing-glue lightpipe** for the charge LEDs: explain how
@@ -321,7 +322,6 @@ treat the broker the same as the web page (see Limitations below).
   visible from outside the handheld enclosure.
 
   <p>
-  <img src="images/lightpipe-glue-over-leds.jpg" width="190" alt="UV-curing glue dome over the TP4056 charge LEDs">
   <img src="images/lightpipe-enclosure-hole.jpg" width="190" alt="Lightpipe viewing hole in the enclosure wall, battery visible behind it">
   <img src="images/lightpipe-enclosure-hole-2.png" width="190" alt="Lightpipe viewing hole, outside view of the enclosure wall">
   </p>
