@@ -310,7 +310,9 @@ treat the broker the same as the web page (see Limitations below).
   in the remote (see `3Dmodels/tp4056.stp`) ships configured for 1 A
   charging by default, which is far too much for the Li-Po cell(s) used
   here. Add a section explaining how to modify the module (resistor swap)
-  for a safe, lower charge current.
+  for a safe, lower charge current. The ISET resistor currently fitted
+  measures about **5.1 kΩ (5k1)** - the value on hand, still to be
+  verified against the datasheet for the actual resulting charge current.
 
   <p>
   <img src="images/wiring-detail-closeup-2.jpg" width="190" alt="TP4056 charge-current-setting resistor (ISET)">
