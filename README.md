@@ -274,6 +274,9 @@ treat the broker the same as the web page (see Limitations below).
   for a safe, lower charge current.
 - **Specify the battery/batteries used** in the remote (type, capacity,
   cell count) - not documented yet.
+- **Document a UV-curing-glue lightpipe** for the charge LEDs: explain how
+  to make a lightpipe with UV-curing glue so the TP4056 charge LEDs stay
+  visible from outside the handheld enclosure.
 
 ## License
 
