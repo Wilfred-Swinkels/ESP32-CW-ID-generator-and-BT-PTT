@@ -76,9 +76,7 @@ power-LED removal on the remote's HM-10 module, plus the TP4056 charger
 board wiring (B+/B-, OUT+/OUT-, and the switch tap).
 
 <p>
-<img src="images/wiring-hm10-pio3-pulldown-1.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor">
-<img src="images/wiring-hm10-pio3-pulldown-2.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor, alternate angle">
-<img src="images/wiring-hm10-pio3-pulldown-3.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor, close-up">
+<img src="images/wiring-hm10-pio3-pulldown-3.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor">
 <img src="images/wiring-hm10-detail-1.jpg" width="190" alt="HM-10 remote module wiring detail">
 </p>
 
