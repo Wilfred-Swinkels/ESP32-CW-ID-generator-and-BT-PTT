@@ -288,6 +288,8 @@ treat the broker the same as the web page (see Limitations below).
 - **Document a UV-curing-glue lightpipe** for the charge LEDs: explain how
   to make a lightpipe with UV-curing glue so the TP4056 charge LEDs stay
   visible from outside the handheld enclosure.
+- **Add a wiring diagram** - the wiring table is there, but a proper
+  schematic would make assembly a lot easier to follow.
 
 ## License
 
