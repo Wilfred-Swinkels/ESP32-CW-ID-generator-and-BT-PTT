@@ -38,7 +38,10 @@ publishes/controllable over MQTT - see
 > separate HM-10 modules anyway, because their simple point-to-point link
 > (one paired as central, one as peripheral) does the whole wireless PTT
 > connection with plain AT commands - no custom BLE/GATT code needed on the
-> ESP32 side.
+> ESP32 side. It also means the handheld remote itself needs no
+> microcontroller at all: the HM-10 there reads the button pin directly and
+> reports its state over the link, so the remote is just the HM-10, the
+> button and a battery.
 
 | Part | Notes |
 |---|---|
