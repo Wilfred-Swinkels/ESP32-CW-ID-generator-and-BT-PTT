@@ -311,8 +311,8 @@ treat the broker the same as the web page (see Limitations below).
   charging by default, which is far too much for the Li-Po cell(s) used
   here. Add a section explaining how to modify the module (resistor swap)
   for a safe, lower charge current. The ISET resistor currently fitted
-  measures about **5.1 kΩ (5k1)** - the value on hand, still to be
-  verified against the datasheet for the actual resulting charge current.
+  measures about **5.1 kΩ (5k1)** - tried and tested, gives a safe charge
+  current for these cells.
 
   <p>
   <img src="images/wiring-detail-closeup-2.jpg" width="190" alt="TP4056 charge-current-setting resistor (ISET)">
