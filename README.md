@@ -76,13 +76,10 @@ power-LED removal on the remote's HM-10 module, plus the TP4056 charger
 board wiring (B+/B-, OUT+/OUT-, and the switch tap).
 
 <p>
-<img src="images/wiring-remote-overview.jpg" width="190" alt="Remote enclosure opened up: HM-10 module, on/off switch and TP4056 board wired together">
 <img src="images/wiring-hm10-pio3-pulldown-1.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor">
 <img src="images/wiring-hm10-pio3-pulldown-2.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor, alternate angle">
 <img src="images/wiring-hm10-pio3-pulldown-3.jpg" width="190" alt="HM-10 remote module, PIO3 pull-down resistor, close-up">
 <img src="images/wiring-hm10-detail-1.jpg" width="190" alt="HM-10 remote module wiring detail">
-<img src="images/wiring-detail-closeup-2.jpg" width="190" alt="Solder joint close-up on the remote module">
-<img src="images/wiring-tp4056-board.jpg" width="190" alt="TP4056 charger board, B+/B- and OUT+/OUT- wiring">
 </p>
 
 **Audio:** GPIO25 idles at about 1.65 V and swings up to 3.3 Vpp. Always
@@ -106,7 +103,10 @@ active-low output, set `PTT_ACTIVE_HIGH` to `false` in the sketch.
 - The HM-10's own **power LED has been removed** (desoldered) to cut
   standby drain.
 
+<p>
+<img src="images/wiring-remote-overview.jpg" width="220" alt="Remote enclosure opened up: HM-10 module, on/off switch and TP4056 board wired together">
 <img src="images/battery-label-582728.jpg" width="220" alt="Battery label: 582728, 3.7V 400mAh">
+</p>
 
 ## HM-10 configuration
 
@@ -311,6 +311,11 @@ treat the broker the same as the web page (see Limitations below).
   charging by default, which is far too much for the Li-Po cell(s) used
   here. Add a section explaining how to modify the module (resistor swap)
   for a safe, lower charge current.
+
+  <p>
+  <img src="images/wiring-detail-closeup-2.jpg" width="190" alt="TP4056 charge-current-setting resistor (ISET)">
+  <img src="images/wiring-tp4056-board.jpg" width="190" alt="TP4056 charger board overview, B+/B- and OUT+/OUT- wiring">
+  </p>
 - **Document a UV-curing-glue lightpipe** for the charge LEDs: explain how
   to make a lightpipe with UV-curing glue so the TP4056 charge LEDs stay
   visible from outside the handheld enclosure.
@@ -318,6 +323,7 @@ treat the broker the same as the web page (see Limitations below).
   <p>
   <img src="images/lightpipe-glue-over-leds.jpg" width="190" alt="UV-curing glue dome over the TP4056 charge LEDs">
   <img src="images/lightpipe-enclosure-hole.jpg" width="190" alt="Lightpipe viewing hole in the enclosure wall, battery visible behind it">
+  <img src="images/lightpipe-enclosure-hole-2.png" width="190" alt="Lightpipe viewing hole, outside view of the enclosure wall">
   </p>
 - **Add a wiring diagram** - the wiring table is there, but a proper
   schematic would make assembly a lot easier to follow.
